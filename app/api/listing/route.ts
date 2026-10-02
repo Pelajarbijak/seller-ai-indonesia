@@ -8,7 +8,8 @@ export async function POST(request: Request) {
     if (!apiKey) {
       return NextResponse.json(
         {
-          error: "GEMINI_API_KEY tidak ditemukan.",
+          success: false,
+          error: "GEMINI_API_KEY tidak ditemukan di server.",
         },
         { status: 500 }
       );
@@ -29,19 +30,41 @@ export async function POST(request: Request) {
       style,
     } = body;
 
-    // Validasi input wajib
+    // ============================================
+    // VALIDASI INPUT
+    // ============================================
+
     if (!productName?.trim() || !category?.trim()) {
       return NextResponse.json(
         {
+          success: false,
           error: "Nama produk dan kategori wajib diisi.",
         },
         { status: 400 }
       );
     }
 
+    // ============================================
+    // GEMINI CLIENT
+    // ============================================
+
     const ai = new GoogleGenAI({
       apiKey,
+      httpOptions: {
+        // Batasi waktu setiap request supaya tidak menggantung
+        timeout: 20000,
+
+        // Batasi retry otomatis SDK.
+        // 1 = hanya 1 percobaan, tanpa retry berulang.
+        retryOptions: {
+          attempts: 1,
+        },
+      },
     });
+
+    // ============================================
+    // PROMPT
+    // ============================================
 
     const prompt = `
 Kamu adalah "Seller AI Indonesia", AI Listing Assistant khusus seller marketplace Indonesia.
@@ -112,9 +135,7 @@ ${style || "Profesional"}
 
 TUGAS:
 
-Buat listing produk lengkap untuk marketplace ${marketplace}.
-
-HASIL WAJIB MENGGUNAKAN FORMAT BERIKUT:
+Buat listing produk lengkap untuk marketplace ${marketplace || "marketplace Indonesia"}.
 
 
 ================================
@@ -257,60 +278,72 @@ ATURAN TAMBAHAN
 `;
 
     // ============================================
-    // GEMINI UTAMA + FALLBACK
+    // FUNGSI PANGGIL GEMINI
     // ============================================
 
-    let response;
+    async function generateWithModel(model: string) {
+      console.log(`Mencoba model: ${model}`);
 
-    try {
-      console.log("Mencoba Gemini 3.8 Flash...");
-
-      response = await ai.interactions.create({
-        model: "gemini-3.8-flash",
+      const result = await ai.interactions.create({
+        model,
         input: prompt,
       });
 
-      console.log("Gemini 3.8 Flash berhasil.");
+      console.log(`Model ${model} berhasil.`);
+
+      return result;
+    }
+
+    // ============================================
+    // MODEL UTAMA
+    // ============================================
+
+    try {
+      const response = await generateWithModel(
+        "gemini-3.8-flash"
+      );
+
+      return NextResponse.json({
+        success: true,
+        result: response.output_text,
+      });
     } catch (primaryError) {
       console.error(
         "Gemini 3.8 Flash gagal:",
         primaryError
       );
-
-      console.log(
-        "Mencoba model Gemini cadangan..."
-      );
-
-      try {
-        response = await ai.interactions.create({
-          model: "gemini-3.7-flash",
-          input: prompt,
-        });
-
-        console.log(
-          "Model Gemini cadangan berhasil."
-        );
-      } catch (fallbackError) {
-        console.error(
-          "Model Gemini cadangan juga gagal:",
-          fallbackError
-        );
-
-        throw new Error(
-          "Gemini sedang mengalami kepadatan atau layanan sedang tidak tersedia. Silakan coba lagi beberapa saat lagi."
-        );
-      }
     }
 
-    return NextResponse.json({
-      success: true,
-      result: response.output_text,
-    });
+    // ============================================
+    // MODEL CADANGAN
+    // ============================================
+
+    try {
+      const response = await generateWithModel(
+        "gemini-3.7-flash"
+      );
+
+      return NextResponse.json({
+        success: true,
+        result: response.output_text,
+      });
+    } catch (fallbackError) {
+      console.error(
+        "Gemini 3.7 Flash juga gagal:",
+        fallbackError
+      );
+
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            "Gemini tidak dapat memproses permintaan saat ini. Silakan coba lagi beberapa saat kemudian.",
+        },
+        { status: 503 }
+      );
+    }
   } catch (error) {
-    console.error(
-      "Gemini API Error:",
-      error
-    );
+    console.error("Listing API Error:", error);
 
     return NextResponse.json(
       {
@@ -318,7 +351,7 @@ ATURAN TAMBAHAN
         error:
           error instanceof Error
             ? error.message
-            : "Terjadi kesalahan saat menghubungi Gemini.",
+            : "Terjadi kesalahan pada server.",
       },
       { status: 500 }
     );
